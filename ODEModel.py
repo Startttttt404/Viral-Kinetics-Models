@@ -88,16 +88,16 @@ class DDEViralKineticsModel:
         t = np.linspace(t_1, t_2, steps)
         return ddeint(self.model_equation, lambda x: y_0, t)
 
-    def create_graph(self, graph_type, location, delta_t, t_1, t_2, y_0, as_log):
-        solution = self.solve(delta_t, t_1, t_2, y_0)
-
-        if as_log:
-            f = lambda x: np.log10(x)
-        else:
-            f = lambda x: x
-
-        steps = int((t_2 - t_1) / delta_t)
-        t = np.linspace(t_1, t_2, steps)
+    def create_graph(self, graph_type, location, solution, t, pre_processing):
+        """
+        Generates and saves a graph from the ODE solution
+        :param graph_type: The solution curve to graph, either 'T', 'I_1', 'I_2', 'V', 'CDE8', 'CDE8e', or 'CDE8m'
+        :param location: path location including file name
+        :param solution: pre-computed solutions from "solve"
+        :param t: a list of timepoints to graph at, must be a subset of the timeframe used to generate in "solve"
+        :param pre_processing:
+        :return:
+        """
 
         figure = plt.figure()
         figure.gca().grid()
@@ -107,37 +107,37 @@ class DDEViralKineticsModel:
             case 'T':
                 figure.gca().set_title("Target Cells Over Time", fontsize=20)
                 figure.gca().set_ylabel("Total Target Cells", fontsize=10)
-                figure.gca().plot(t, f(solution[:, 0]))
+                figure.gca().plot(t, pre_processing(solution[:, 0]))
                 figure.gca().set_ylim(bottom=0)
             case 'I_1':
                 figure.gca().set_title("Pre-Infected Cells Over Time", fontsize=20)
                 figure.gca().set_ylabel("Total Pre-Infected Cells", fontsize=10)
-                figure.gca().plot(t, f(solution[:, 1]))
+                figure.gca().plot(t, pre_processing(solution[:, 1]))
                 figure.gca().set_ylim(bottom=0)
             case 'I_2':
                 figure.gca().set_title("Infected Cells Over Time", fontsize=20)
                 figure.gca().set_ylabel("Total Infected Cells", fontsize=10)
-                figure.gca().plot(t, f(solution[:, 2]))
+                figure.gca().plot(t, pre_processing(solution[:, 2]))
                 figure.gca().set_ylim(bottom=0)
             case 'V':
                 figure.gca().set_title("Virus Over Time", fontsize=20)
                 figure.gca().set_ylabel("Total Virus", fontsize=10)
-                figure.gca().plot(t, f(solution[:, 3]))
+                figure.gca().plot(t, pre_processing(solution[:, 3]))
                 figure.gca().set_ylim(bottom=0)
             case 'CDE8':
                 figure.gca().set_title("CDE8 Cells Over Time", fontsize=20)
                 figure.gca().set_ylabel("Total CDE8 Cells", fontsize=10)
-                figure.gca().plot(t, f(self._initial_cde8 + np.add(solution[:, 4], solution[:, 5])))
-                figure.gca().set_ylim(bottom=f(self._initial_cde8))
+                figure.gca().plot(t, pre_processing(self._initial_cde8 + np.add(solution[:, 4], solution[:, 5])))
+                figure.gca().set_ylim(bottom=pre_processing(self._initial_cde8))
             case 'E':
                 figure.gca().set_title("CDE8e Cells Over Time", fontsize=20)
                 figure.gca().set_ylabel("Total CDE8e Cells", fontsize=10)
-                figure.gca().plot(t, f(solution[:, 4]))
+                figure.gca().plot(t, pre_processing(solution[:, 4]))
                 figure.gca().set_ylim(bottom=0)
             case 'E_M':
                 figure.gca().set_title("CDE8m Cells Over Time", fontsize=20)
                 figure.gca().set_ylabel("Total CDE8m Cells", fontsize=10)
-                figure.gca().plot(t, f(solution[:, 5]))
+                figure.gca().plot(t, pre_processing(solution[:, 5]))
                 figure.gca().set_ylim(bottom=0)
             case default:
                 assert False, "Invalid Graph Type"
@@ -145,12 +145,17 @@ class DDEViralKineticsModel:
         figure.savefig(location)
         figure.show()
 
+
 if __name__ == '__main__':
     model = DDEViralKineticsModel()
-    model.create_graph('T', "graphs/Target_log10.png", 0.001, 0, 12, (1.0e7, 75, 0, 0, 0, 0,), True)
-    model.create_graph('I_1', "graphs/Pre-Infected_log10.png", 0.001, 0, 12, (1.0e7, 75, 0, 0, 0, 0,), True)
-    model.create_graph('I_2', "graphs/Infected_log10.png", 0.001, 0, 12, (1.0e7, 75, 0, 0, 0, 0,), True)
-    model.create_graph('V', "graphs/Virus_log10.png", 0.001, 0, 12, (1.0e7, 75, 0, 0, 0, 0,), True)
-    model.create_graph('CDE8', "graphs/CDE8_log10.png", 0.001, 0, 12, (1.0e7, 75, 0, 0, 0, 0, ), True)
-    model.create_graph('E', "graphs/CDE8e_log10.png", 0.001, 0, 12, (1.0e7, 75, 0, 0, 0, 0,), True)
-    model.create_graph('E_M', "graphs/CDE8m_log10.png", 0.001, 0, 12, (1.0e7, 75, 0, 0, 0, 0,), True)
+    solution = model.solve(0.001, 0, 12, (1.0e7, 75, 0, 0, 0, 0,))
+    steps = int((12 - 0) / 0.001)
+    t = np.linspace(0, 12, steps)
+
+    model.create_graph('T', "graphs/Target_log10.png", solution, t, np.log10)
+    model.create_graph('I_1', "graphs/Pre-Infected_log10.png", solution, t, np.log10)
+    model.create_graph('I_2', "graphs/Infected_log10.png", solution, t, np.log10)
+    model.create_graph('V', "graphs/Virus_log10.png", solution, t, np.log10)
+    model.create_graph('CDE8', "graphs/CDE8_log10.png", solution, t, np.log10)
+    model.create_graph('E', "graphs/CDE8e_log10.png", solution, t, np.log10)
+    model.create_graph('E_M', "graphs/CDE8m_log10.png", solution, t, np.log10)
