@@ -117,7 +117,7 @@ def generate_viral_kinetics_dataset(variable_elements, num_choices, delta_t, t_0
 
         counter = 0
         while counter < len(solution) - int(delta_t / 0.001):
-            x = solution[counter]
+            x = np.append(counter + int(delta_t / 0.001), solution[counter])
             y = solution[counter + int(delta_t / 0.001)]
             counter += 1
             datapoints.append(np.append(x, y))
@@ -126,13 +126,13 @@ def generate_viral_kinetics_dataset(variable_elements, num_choices, delta_t, t_0
 
     print("Saving CSV.")
     df.to_csv(generate_file_name(actual_variable_elements, num_choices, delta_t, t_0, t_n),
-              header=["xTarget", "xPre-Infected", "xInfected", "xVirus", "xCDE8e", "xCD8m",
+              header=["references", "xTarget", "xPre-Infected", "xInfected", "xVirus", "xCDE8e", "xCD8m",
                       "yTarget", "yPre-Infected", "yInfected", "yVirus", "yCDE8e", "yCD8m"],
               index=False)
     print("Finished!")
 
 
 if __name__ == '__main__':
-    generate_viral_kinetics_dataset(['delta', 'd_e', 'eta'], 1, 1, 0, 12)
-    #generate_viral_kinetics_dataset(['delta', 'd_e', 'eta'], 5, 0.01, 0, 12)
+    # generate_viral_kinetics_dataset([], 1, 1, 0, 12)
+    generate_viral_kinetics_dataset(['delta', 'd_e', 'eta'], 5, 1, 0, 12)
 

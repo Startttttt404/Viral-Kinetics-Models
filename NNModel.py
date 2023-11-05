@@ -97,9 +97,10 @@ class ViralKineticsDNNClassifier(pl.LightningModule):
         self.stack = nn.Sequential(
             nn.Linear(6, 124, dtype=torch.float64).to(DEVICE),
             nn.ReLU(),
-            # nn.Dropout(0.3),
+            nn.Dropout(0.3),
             nn.Linear(124, 256, dtype=torch.float64).to(DEVICE),
             nn.ReLU(),
+            nn.Dropout(0.3),
             nn.Linear(256, 4, dtype=torch.float64).to(DEVICE),
         )
         self.loss_function = nn.CrossEntropyLoss()
@@ -185,72 +186,200 @@ class ODEDatasetClassifier(torch.utils.data.Dataset):
         # y = torch.tensor(row[6]).double().to(DEVICE)
         return x, y_tensor
 
+class ODEDatasetClassifierNoisy(torch.utils.data.Dataset):
+    def __init__(self, path, atr):
+        data = pd.read_csv(path)
+
+        noise = np.random.normal(0, 10000, [len(data), 12])
+        data = data + noise
+
+        data = data.mask(data < 1, 1)
+
+        data['xTarget'] = np.log(data['xTarget'])
+        data['xPre-Infected'] = np.log(data['xPre-Infected'])
+        data['xInfected'] = np.log(data['xInfected'])
+        data['xVirus'] = np.log(data['xVirus'])
+        data['xCDE8e'] = np.log(data['xCDE8e'])
+        data['xCD8m'] = np.log(data['xCD8m'])
+        y_cols = ['yTarget', 'yPre-Infected', 'yInfected', 'yVirus', 'yCDE8e', 'yCD8m']
+        y_cols.pop(atr)
+        data = data.drop(columns=y_cols)
+
+        # y_col = data.iloc[:, 6]
+        # noise = pd.Series(np.random.normal(0, 10000, [len(data), 1]).flatten())
+        # y_col = y_col + noise
+
+        self.y_max = data.max(axis=0)[6]
+        self.y_min = data.min(axis=0)[6]
+        self.data = data
+
+    def __len__(self):
+        return len(self.data)
+
+    def bracket(self, y):
+        y_mid = (self.y_min + self.y_max) / 2
+        if y > y_mid:
+            if y > (y_mid + self.y_max) / 2:
+                return 3
+            else:
+                return 2
+        elif y > (y_mid + self.y_min) / 2:
+            return 1
+        return 0
+
+    def __getitem__(self, idx):
+        row = self.data.iloc[idx]
+        x = torch.from_numpy(row[0:6].to_numpy()).double().to(DEVICE)
+        y = row[6]
+        y_tensor = torch.zeros(4).double().to(DEVICE)
+        y_tensor[self.bracket(y)] = 1
+        # y = torch.tensor(row[6]).double().to(DEVICE)
+        return x, y_tensor
+
+
 
 if __name__ == '__main__':
-    dataset = ODEDatasetClassifier("data/viral_kinetics_none_0.01_0_12.csv", 0)
+    dataset = ODEDatasetClassifierNoisy("data/viral_kinetics_delta_eta_d_e_1_1_0_12.csv", 3)
     training_dataset, testing_dataset = torch.utils.data.random_split(dataset, [.85, .15])
     model = ViralKineticsDNNClassifier()
     training_loader = torch.utils.data.DataLoader(training_dataset, batch_size=BATCH_SIZE, shuffle=True)
     testing_loader = torch.utils.data.DataLoader(testing_dataset, batch_size=BATCH_SIZE)
 
-    trainer = pl.Trainer(log_every_n_steps=1, accelerator=DEVICE, max_epochs=2000,
-                         logger=TensorBoardLogger("lightning_logs", name="0.01-0 to 12 Model, only T as Classifier", version="version_1"))
+    trainer = pl.Trainer(log_every_n_steps=1, accelerator=DEVICE, max_epochs=500,
+                         logger=TensorBoardLogger("lightning_logs", name="1 Day, only V as Classifier, Noisy, Varied System Variables", version="version_1"))
     trainer.fit(model=model, train_dataloaders=training_loader, val_dataloaders=testing_loader)
 
-    dataset = ODEDatasetClassifier("data/viral_kinetics_none_0.01_0_12.csv", 1)
+
+    # dataset = ODEDatasetClassifier("data/viral_kinetics_none_0.01_0_12.csv", 0)
+    # training_dataset, testing_dataset = torch.utils.data.random_split(dataset, [.85, .15])
+    # model = ViralKineticsDNNClassifier()
+    # training_loader = torch.utils.data.DataLoader(training_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    # testing_loader = torch.utils.data.DataLoader(testing_dataset, batch_size=BATCH_SIZE)
+    #
+    # trainer = pl.Trainer(log_every_n_steps=1, accelerator=DEVICE, max_epochs=2000,
+    #                      logger=TensorBoardLogger("lightning_logs", name="0.01-0 to 12 Model, only T as Classifier", version="version_1"))
+    # trainer.fit(model=model, train_dataloaders=training_loader, val_dataloaders=testing_loader)
+    #
+    # dataset = ODEDatasetClassifier("data/viral_kinetics_none_0.01_0_12.csv", 1)
+    # training_dataset, testing_dataset = torch.utils.data.random_split(dataset, [.85, .15])
+    # model = ViralKineticsDNNClassifier()
+    # training_loader = torch.utils.data.DataLoader(training_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    # testing_loader = torch.utils.data.DataLoader(testing_dataset, batch_size=BATCH_SIZE)
+    #
+    # trainer = pl.Trainer(log_every_n_steps=1, accelerator=DEVICE, max_epochs=2000,
+    #                      logger=TensorBoardLogger("lightning_logs", name="0.01-0 to 12 Model, only P_I as Classifier",
+    #                                               version="version_1"))
+    # trainer.fit(model=model, train_dataloaders=training_loader, val_dataloaders=testing_loader)
+    #
+    # dataset = ODEDatasetClassifier("data/viral_kinetics_none_0.01_0_12.csv", 2)
+    # training_dataset, testing_dataset = torch.utils.data.random_split(dataset, [.85, .15])
+    # model = ViralKineticsDNNClassifier()
+    # training_loader = torch.utils.data.DataLoader(training_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    # testing_loader = torch.utils.data.DataLoader(testing_dataset, batch_size=BATCH_SIZE)
+    #
+    # trainer = pl.Trainer(log_every_n_steps=1, accelerator=DEVICE, max_epochs=2000,
+    #                      logger=TensorBoardLogger("lightning_logs", name="0.01-0 to 12 Model, only I as Classifier",
+    #                                               version="version_1"))
+    # trainer.fit(model=model, train_dataloaders=training_loader, val_dataloaders=testing_loader)
+    #
+    # dataset = ODEDatasetClassifier("data/viral_kinetics_none_0.01_0_12.csv", 3)
+    # training_dataset, testing_dataset = torch.utils.data.random_split(dataset, [.85, .15])
+    # model = ViralKineticsDNNClassifier()
+    # training_loader = torch.utils.data.DataLoader(training_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    # testing_loader = torch.utils.data.DataLoader(testing_dataset, batch_size=BATCH_SIZE)
+    #
+    # trainer = pl.Trainer(log_every_n_steps=1, accelerator=DEVICE, max_epochs=2000,
+    #                      logger=TensorBoardLogger("lightning_logs", name="0.01-0 to 12 Model, only V as Classifier",
+    #                                               version="version_1"))
+    # trainer.fit(model=model, train_dataloaders=training_loader, val_dataloaders=testing_loader)
+    #
+    # dataset = ODEDatasetClassifier("data/viral_kinetics_none_0.01_0_12.csv", 4)
+    # training_dataset, testing_dataset = torch.utils.data.random_split(dataset, [.85, .15])
+    # model = ViralKineticsDNNClassifier()
+    # training_loader = torch.utils.data.DataLoader(training_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    # testing_loader = torch.utils.data.DataLoader(testing_dataset, batch_size=BATCH_SIZE)
+    #
+    # trainer = pl.Trainer(log_every_n_steps=1, accelerator=DEVICE, max_epochs=2000,
+    #                      logger=TensorBoardLogger("lightning_logs", name="0.01-0 to 12 Model, only E as Classifier",
+    #                                               version="version_1"))
+    # trainer.fit(model=model, train_dataloaders=training_loader, val_dataloaders=testing_loader)
+    #
+    # dataset = ODEDatasetClassifier("data/viral_kinetics_none_0.01_0_12.csv", 5)
+    # training_dataset, testing_dataset = torch.utils.data.random_split(dataset, [.85, .15])
+    # model = ViralKineticsDNNClassifier()
+    # training_loader = torch.utils.data.DataLoader(training_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    # testing_loader = torch.utils.data.DataLoader(testing_dataset, batch_size=BATCH_SIZE)
+    #
+    # trainer = pl.Trainer(log_every_n_steps=1, accelerator=DEVICE, max_epochs=2000,
+    #                      logger=TensorBoardLogger("lightning_logs", name="0.01-0 to 12 Model, only E_M as Classifier",
+    #                                               version="version_1"))
+    # trainer.fit(model=model, train_dataloaders=training_loader, val_dataloaders=testing_loader)
+
+
+    # dataset = ODEDatasetClassifierNoisy("data/viral_kinetics_none_0.01_0_12.csv", 0)
+    # training_dataset, testing_dataset = torch.utils.data.random_split(dataset, [.85, .15])
+    # model = ViralKineticsDNNClassifier()
+    # training_loader = torch.utils.data.DataLoader(training_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    # testing_loader = torch.utils.data.DataLoader(testing_dataset, batch_size=BATCH_SIZE)
+    #
+    # trainer = pl.Trainer(log_every_n_steps=1, accelerator=DEVICE, max_epochs=2000,
+    #                      logger=TensorBoardLogger("lightning_logs", name="0.01-0 to 12 Model, only T as Classifier, Noisy Testing", version="version_1"))
+    # trainer.fit(model=model, train_dataloaders=training_loader, val_dataloaders=testing_loader)
+    #
+    # dataset = ODEDatasetClassifierNoisy("data/viral_kinetics_none_0.01_0_12.csv", 1)
+    # training_dataset, testing_dataset = torch.utils.data.random_split(dataset, [.85, .15])
+    # model = ViralKineticsDNNClassifier()
+    # training_loader = torch.utils.data.DataLoader(training_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    # testing_loader = torch.utils.data.DataLoader(testing_dataset, batch_size=BATCH_SIZE)
+    #
+    # trainer = pl.Trainer(log_every_n_steps=1, accelerator=DEVICE, max_epochs=2000,
+    #                      logger=TensorBoardLogger("lightning_logs", name="0.01-0 to 12 Model, only P_I as Classifier, Noisy Testing",
+    #                                               version="version_1"))
+    # trainer.fit(model=model, train_dataloaders=training_loader, val_dataloaders=testing_loader)
+    #
+    dataset = ODEDatasetClassifierNoisy("data/viral_kinetics_none_0.01_0_12.csv", 2)
     training_dataset, testing_dataset = torch.utils.data.random_split(dataset, [.85, .15])
     model = ViralKineticsDNNClassifier()
     training_loader = torch.utils.data.DataLoader(training_dataset, batch_size=BATCH_SIZE, shuffle=True)
     testing_loader = torch.utils.data.DataLoader(testing_dataset, batch_size=BATCH_SIZE)
 
     trainer = pl.Trainer(log_every_n_steps=1, accelerator=DEVICE, max_epochs=2000,
-                         logger=TensorBoardLogger("lightning_logs", name="0.01-0 to 12 Model, only P_I as Classifier",
+                         logger=TensorBoardLogger("lightning_logs", name="0.01-0 to 12 Model, only I as Classifier, Noisy Testing",
                                                   version="version_1"))
     trainer.fit(model=model, train_dataloaders=training_loader, val_dataloaders=testing_loader)
 
-    dataset = ODEDatasetClassifier("data/viral_kinetics_none_0.01_0_12.csv", 2)
+    dataset = ODEDatasetClassifierNoisy("data/viral_kinetics_none_0.01_0_12.csv", 3)
     training_dataset, testing_dataset = torch.utils.data.random_split(dataset, [.85, .15])
     model = ViralKineticsDNNClassifier()
     training_loader = torch.utils.data.DataLoader(training_dataset, batch_size=BATCH_SIZE, shuffle=True)
     testing_loader = torch.utils.data.DataLoader(testing_dataset, batch_size=BATCH_SIZE)
 
     trainer = pl.Trainer(log_every_n_steps=1, accelerator=DEVICE, max_epochs=2000,
-                         logger=TensorBoardLogger("lightning_logs", name="0.01-0 to 12 Model, only I as Classifier",
+                         logger=TensorBoardLogger("lightning_logs", name="0.01-0 to 12 Model, only V as Classifier, Noisy Testing",
                                                   version="version_1"))
     trainer.fit(model=model, train_dataloaders=training_loader, val_dataloaders=testing_loader)
 
-    dataset = ODEDatasetClassifier("data/viral_kinetics_none_0.01_0_12.csv", 3)
-    training_dataset, testing_dataset = torch.utils.data.random_split(dataset, [.85, .15])
-    model = ViralKineticsDNNClassifier()
-    training_loader = torch.utils.data.DataLoader(training_dataset, batch_size=BATCH_SIZE, shuffle=True)
-    testing_loader = torch.utils.data.DataLoader(testing_dataset, batch_size=BATCH_SIZE)
-
-    trainer = pl.Trainer(log_every_n_steps=1, accelerator=DEVICE, max_epochs=2000,
-                         logger=TensorBoardLogger("lightning_logs", name="0.01-0 to 12 Model, only V as Classifier",
-                                                  version="version_1"))
-    trainer.fit(model=model, train_dataloaders=training_loader, val_dataloaders=testing_loader)
-
-    dataset = ODEDatasetClassifier("data/viral_kinetics_none_0.01_0_12.csv", 4)
-    training_dataset, testing_dataset = torch.utils.data.random_split(dataset, [.85, .15])
-    model = ViralKineticsDNNClassifier()
-    training_loader = torch.utils.data.DataLoader(training_dataset, batch_size=BATCH_SIZE, shuffle=True)
-    testing_loader = torch.utils.data.DataLoader(testing_dataset, batch_size=BATCH_SIZE)
-
-    trainer = pl.Trainer(log_every_n_steps=1, accelerator=DEVICE, max_epochs=2000,
-                         logger=TensorBoardLogger("lightning_logs", name="0.01-0 to 12 Model, only E as Classifier",
-                                                  version="version_1"))
-    trainer.fit(model=model, train_dataloaders=training_loader, val_dataloaders=testing_loader)
-
-    dataset = ODEDatasetClassifier("data/viral_kinetics_none_0.01_0_12.csv", 5)
-    training_dataset, testing_dataset = torch.utils.data.random_split(dataset, [.85, .15])
-    model = ViralKineticsDNNClassifier()
-    training_loader = torch.utils.data.DataLoader(training_dataset, batch_size=BATCH_SIZE, shuffle=True)
-    testing_loader = torch.utils.data.DataLoader(testing_dataset, batch_size=BATCH_SIZE)
-
-    trainer = pl.Trainer(log_every_n_steps=1, accelerator=DEVICE, max_epochs=2000,
-                         logger=TensorBoardLogger("lightning_logs", name="0.01-0 to 12 Model, only E_M as Classifier",
-                                                  version="version_1"))
-    trainer.fit(model=model, train_dataloaders=training_loader, val_dataloaders=testing_loader)
+    # dataset = ODEDatasetClassifierNoisy("data/viral_kinetics_none_0.01_0_12.csv", 4)
+    # training_dataset, testing_dataset = torch.utils.data.random_split(dataset, [.85, .15])
+    # model = ViralKineticsDNNClassifier()
+    # training_loader = torch.utils.data.DataLoader(training_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    # testing_loader = torch.utils.data.DataLoader(testing_dataset, batch_size=BATCH_SIZE)
+    #
+    # trainer = pl.Trainer(log_every_n_steps=1, accelerator=DEVICE, max_epochs=2000,
+    #                      logger=TensorBoardLogger("lightning_logs", name="0.01-0 to 12 Model, only E as Classifier, Noisy Testing",
+    #                                               version="version_1"))
+    # trainer.fit(model=model, train_dataloaders=training_loader, val_dataloaders=testing_loader)
+    #
+    # dataset = ODEDatasetClassifierNoisy("data/viral_kinetics_none_0.01_0_12.csv", 5)
+    # training_dataset, testing_dataset = torch.utils.data.random_split(dataset, [.85, .15])
+    # model = ViralKineticsDNNClassifier()
+    # training_loader = torch.utils.data.DataLoader(training_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    # testing_loader = torch.utils.data.DataLoader(testing_dataset, batch_size=BATCH_SIZE)
+    #
+    # trainer = pl.Trainer(log_every_n_steps=1, accelerator=DEVICE, max_epochs=2000,
+    #                      logger=TensorBoardLogger("lightning_logs", name="0.01-0 to 12 Model, only E_M as Classifier, Noisy Testing",
+    #                                               version="version_1"))
+    # trainer.fit(model=model, train_dataloaders=training_loader, val_dataloaders=testing_loader)
 
     # dataset0 = ODEDataset("data/viral_kinetics_none_0.01_0_12.csv")
     # dataset1 = ODEDataset("data/viral_kinetics_none_0.01_0_10.csv")
