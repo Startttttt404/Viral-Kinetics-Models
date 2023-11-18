@@ -133,6 +133,6 @@ def generate_viral_kinetics_dataset(variable_elements, num_choices, delta_t, t_0
 
 
 if __name__ == '__main__':
-    # generate_viral_kinetics_dataset([], 1, 1, 0, 12)
-    generate_viral_kinetics_dataset(['delta', 'd_e', 'eta'], 5, 1, 0, 12)
+    generate_viral_kinetics_dataset([], 1, 0.01, 0, 12)
+    #generate_viral_kinetics_dataset(['delta', 'eta'], 1, 1, 0, 12)
 
