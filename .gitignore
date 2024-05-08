@@ -1,5 +1,5 @@
-lightning_logs/
-graphs/
-results/
-data/
-__pycache__/
+/lightning_logs/
+/graphs/
+/results/
+/data/
+/__pycache__/
