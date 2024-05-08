@@ -1,19 +1,28 @@
+"""
+Implements the Viral Kinetics DDE system defined in the following paper:
+    Margaret A Myers, Amanda P Smith, Lindey C Lane, David J Moquin, Rosemary Aogo, Stacie Woolard, Paul Thomas,
+    Peter Vogel, Amber M Smith (2021) Dynamically linking influenza virus infection kinetics, lung injury,
+    inflammation, and disease severity eLife 10:e68864
+    https://doi.org/10.7554/eLife.68864
+
+Also implements a way to graph the solution curves. Running the file will generate all solution curves of the "ideal" system defined in the paper above.
+"""
+
 import matplotlib.pyplot as plt
 import numpy as np
-from ddeint import ddeint
 
+from tqdm import tqdm
+from ddeint import ddeint
+from pathlib import Path
 
 class DDEViralKineticsModel:
     def __init__(self, beta=6.2e-5, k=4.0, p=1.0, c=9.4, delta=2.4e-1, delta_e=1.9,
                  k_delta_e=4.3e2, xi=2.6e4, k_e=8.1e5, eta=2.5e-7, tau_e=3.6,
                  d_e=1.0, zeta=2.2e-1, tau_m=3.5, initial_cd8=4.2e5):
         """
-        Initializes the Viral Kinetics DDE model as described in the following paper.
+        Initializes the Viral Kinetics DDE model as described in the above paper.
         System values default to the "best-fit" parameters determined there.
-            Margaret A Myers, Amanda P Smith, Lindey C Lane, David J Moquin, Rosemary Aogo, Stacie Woolard, Paul Thomas,
-            Peter Vogel, Amber M Smith (2021) Dynamically linking influenza virus infection kinetics, lung injury,
-            inflammation, and disease severity eLife 10:e68864
-            https://doi.org/10.7554/eLife.68864
+
         :param beta: Virus Infectivity, 6.2 x 10^-5
         :param k: Eclipse phase transition, 4.0
         :param p: Virus Production, 1.0
@@ -76,6 +85,7 @@ class DDEViralKineticsModel:
     def solve(self, delta_t, t_1, t_2, y_0):
         """
         Solves the DDE system iteratively and outputs the result
+
         :param delta_t: The amount of time per "step", in days
         :param t_1: The starting time, in days
         :param t_2: The ending time, in days
@@ -86,17 +96,17 @@ class DDEViralKineticsModel:
 
         steps = int((t_2 - t_1) / delta_t)
         t = np.linspace(t_1, t_2, steps)
-        return ddeint(self.model_equation, lambda x: y_0, t)
+        return ddeint(self.model_equation, lambda _: y_0, t)
 
-    def create_graph(self, graph_type, location, solution, t, pre_processing):
+    def create_graph(self, graph_type, file_name, solution, t, pre_processing, pre_processing_label=""):
         """
         Generates and saves a graph from the ODE solution
+
         :param graph_type: The solution curve to graph, either 'T', 'I_1', 'I_2', 'V', 'CDE8', 'CDE8e', or 'CDE8m'
-        :param location: path location including file name
+        :param file_name: filename to save the graph as within the "graphs/Solution_Curves" folder
         :param solution: pre-computed solutions from "solve"
         :param t: a list of timepoints to graph at, must be a subset of the timeframe used to generate in "solve"
-        :param pre_processing:
-        :return:
+        :param pre_processing: a function to be applied the data
         """
 
         figure = plt.figure()
@@ -106,45 +116,55 @@ class DDEViralKineticsModel:
         match graph_type:
             case 'T':
                 figure.gca().set_title("Target Cells Over Time", fontsize=20)
-                figure.gca().set_ylabel("Total Target Cells", fontsize=10)
+                figure.gca().set_ylabel("Total Target Cells " + pre_processing_label, fontsize=10)
                 figure.gca().plot(t, pre_processing(solution[:, 0]))
                 figure.gca().set_ylim(bottom=0)
             case 'I_1':
                 figure.gca().set_title("Pre-Infected Cells Over Time", fontsize=20)
-                figure.gca().set_ylabel("Total Pre-Infected Cells", fontsize=10)
+                figure.gca().set_ylabel("Total Pre-Infected Cells " + pre_processing_label, fontsize=10)
                 figure.gca().plot(t, pre_processing(solution[:, 1]))
                 figure.gca().set_ylim(bottom=0)
             case 'I_2':
                 figure.gca().set_title("Infected Cells Over Time", fontsize=20)
-                figure.gca().set_ylabel("Total Infected Cells", fontsize=10)
+                figure.gca().set_ylabel("Total Infected Cells " + pre_processing_label, fontsize=10)
                 figure.gca().plot(t, pre_processing(solution[:, 2]))
                 figure.gca().set_ylim(bottom=0)
             case 'V':
                 figure.gca().set_title("Virus Over Time", fontsize=20)
-                figure.gca().set_ylabel("Total Virus", fontsize=10)
+                figure.gca().set_ylabel("Total Virus " + pre_processing_label, fontsize=10)
                 figure.gca().plot(t, pre_processing(solution[:, 3]))
                 figure.gca().set_ylim(bottom=0)
             case 'CDE8':
                 figure.gca().set_title("CDE8 Cells Over Time", fontsize=20)
-                figure.gca().set_ylabel("Total CDE8 Cells", fontsize=10)
+                figure.gca().set_ylabel("Total CDE8 Cells " + pre_processing_label, fontsize=10)
                 figure.gca().plot(t, pre_processing(self._initial_cde8 + np.add(solution[:, 4], solution[:, 5])))
                 figure.gca().set_ylim(bottom=pre_processing(self._initial_cde8))
             case 'E':
                 figure.gca().set_title("CDE8e Cells Over Time", fontsize=20)
-                figure.gca().set_ylabel("Total CDE8e Cells", fontsize=10)
+                figure.gca().set_ylabel("Total CDE8e Cells " + pre_processing_label, fontsize=10)
                 figure.gca().plot(t, pre_processing(solution[:, 4]))
                 figure.gca().set_ylim(bottom=0)
             case 'E_M':
                 figure.gca().set_title("CDE8m Cells Over Time", fontsize=20)
-                figure.gca().set_ylabel("Total CDE8m Cells", fontsize=10)
+                figure.gca().set_ylabel("Total CDE8m Cells " + pre_processing_label, fontsize=10)
                 figure.gca().plot(t, pre_processing(solution[:, 5]))
                 figure.gca().set_ylim(bottom=0)
             case default:
                 assert False, "Invalid Graph Type"
 
-        figure.savefig(location)
-        figure.show()
+        graphs_dir = Path("./graphs")
+        graphs_dir.mkdir(exist_ok=True)
 
+        save_directory = graphs_dir / "Solution_Curves"
+        save_directory.mkdir(exist_ok=True)
+
+        figure.savefig(save_directory / file_name)
+
+def safe_log10(x):
+    """
+    A "safe" version of np.log10 which maps values <= 0 to 0 instead of trying to take the log. Useful for graph pre-processing 
+    """
+    return np.log10(x, where=x>0, out=np.zeros_like(x))
 
 if __name__ == '__main__':
     model = DDEViralKineticsModel()
@@ -152,10 +172,17 @@ if __name__ == '__main__':
     steps = int((12 - 0) / 0.001)
     t = np.linspace(0, 12, steps)
 
-    model.create_graph('T', "graphs/Target_log10.png", solution, t, np.log10)
-    model.create_graph('I_1', "graphs/Pre-Infected_log10.png", solution, t, np.log10)
-    model.create_graph('I_2', "graphs/Infected_log10.png", solution, t, np.log10)
-    model.create_graph('V', "graphs/Virus_log10.png", solution, t, np.log10)
-    model.create_graph('CDE8', "graphs/CDE8_log10.png", solution, t, np.log10)
-    model.create_graph('E', "graphs/CDE8e_log10.png", solution, t, np.log10)
-    model.create_graph('E_M', "graphs/CDE8m_log10.png", solution, t, np.log10)
+    parameter_sets = [
+        ['T', "Target_log10.png", solution, t, safe_log10, "(log10)"],
+        ['I_1', "Pre-Infected_log10.png", solution, t, safe_log10, "(log10)"],
+        ['I_2', "Infected_log10.png", solution, t, safe_log10, "(log10)"],
+        ['V', "Virus_log10.png", solution, t, safe_log10, "(log10)"],
+        ['CDE8', "CDE8_log10.png", solution, t, safe_log10, "(log10)"],
+        ['E', "CDE8e_log10.png", solution, t, safe_log10, "(log10)"],
+        ['E_M', "CDE8m_log10.png", solution, t, safe_log10, "(log10)"]
+    ]
+
+    for parameter_set in tqdm(parameter_sets, desc="Generating Solution Curve Graphs"):
+        model.create_graph(*parameter_set)
+
+    "Generation Complete!"
