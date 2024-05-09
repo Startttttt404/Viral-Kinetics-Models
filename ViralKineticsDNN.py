@@ -1,29 +1,60 @@
+"""
+A model definition for DNN predictor of DDE model defined in the paper below. The DDE model is implemented in ViralKineticsDDE.py. 
+Additionally, various tools for performing experiments with the DNN model are included here.
+
+Margaret A Myers, Amanda P Smith, Lindey C Lane, David J Moquin, Rosemary Aogo, Stacie Woolard, Paul Thomas,
+Peter Vogel, Amber M Smith (2021) Dynamically linking influenza virus infection kinetics, lung injury,
+inflammation, and disease severity eLife 10:e68864
+https://doi.org/10.7554/eLife.68864
+"""
+
 import pandas as pd
 import numpy as np
-from itertools import combinations
-from torch import optim, nn, utils, from_numpy, zeros, float64, argmax
-from torchmetrics import Accuracy
 import lightning as L
+import shutil
+
+from pathlib import Path
+from itertools import combinations
+from torch import optim, nn, utils, from_numpy, zeros, float64, argmax, set_float32_matmul_precision, cuda
+from torchmetrics import Accuracy
 from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.pytorch.callbacks import EarlyStopping, RichProgressBar
 
-BATCH_SIZE = 64
-
 class ViralKineticsDNN(L.LightningModule):
-    def __init__(self, in_features, num_buckets):
+    """
+    DNN Model attempting to "skip" ahead reference_timestep (defined in DatasetGenerator.py) to make predictions.
+    The output is a discretization of a continous output. I.e, if the DDE solution has range R, this DNN attempts to place the output in num_outputs equi-sized subsets of R.
+    Example: If R = [0,1] and the DNN has num_outputs = 4, the DNN tries to place the output in [0,.25], [.25,.5], [.5,.75], or [.75, 1] with class 0, 1, 2, 3 respectively.
+
+    Uses a moderate size network approach to allow for mass model creation/testing/experimentation. You may need to fine tune the model for more precise applications.
+    As it stands, it is a 2-layer DNN utilizing hidden_layer_multiplier * num_input_features * num_output_features nodes in each layer.
+    It uses Adam optimizer with 0.001 learning rate and Cross Entropy Loss function.
+
+    :param input_features: the set of input features, as a list. Must be a subset (or the whole set) of [0, 1, 2, 3, 4, 5].
+                        0 represents Target Cells, T
+                        1 represents Pre-Infected Cells, I_1
+                        2 represents Infected Cells, I_2
+                        3 represents Viral Load, V
+                        4 represents Immune Response, E
+                        5 represents Memorized Immune Response, E_M
+                        For a much better description of each of these variables, please see the paper above. 
+    :param num_outputs: an integer defining the number of discretized subsets of the DNN solution's range. In practice, the number of classes.
+    :param hidden_layer_multiplier: an OPTIONAL (and not included in the testing_average/perform_experiment definitions) integer parameter. Multiplies the hidden layer number of nodes. Defaults is 2
+    """
+    def __init__(self, input_features: list, num_outputs: int, hidden_layer_multiplier=2):
         super().__init__()
-        self.in_features = set(in_features)
-        self.num_buckets = num_buckets
+        self.input_features = set(input_features)
+        self.num_outputs = num_outputs
         self.stack = nn.Sequential(
-            nn.Linear(len(self.in_features), 2 * len(self.in_features) * num_buckets, dtype=float64),
+            nn.Linear(len(self.input_features), hidden_layer_multiplier * len(self.input_features) * num_outputs, dtype=float64),
             nn.ReLU(),
-            nn.Linear(2 * len(self.in_features) * num_buckets, len(self.in_features) * num_buckets, dtype=float64),
+            nn.Linear(hidden_layer_multiplier * len(self.input_features) * num_outputs, len(self.input_features) * num_outputs, dtype=float64),
             nn.ReLU(),
-            nn.Linear(len(self.in_features) * num_buckets, num_buckets, dtype=float64)
+            nn.Linear(len(self.input_features) * num_outputs, num_outputs, dtype=float64)
         )
-        self.loss_function = nn.CrossEntropyLoss()
+        self.loss_function = LOSS_FUNCTION
         self.softmax = nn.Softmax(dim=1)
-        self.accuracy = Accuracy(task="multiclass", num_classes=num_buckets)
+        self.accuracy = Accuracy(task="multiclass", num_classes=num_outputs)
 
     def forward(self, x):
         return self.softmax(self.stack(x).squeeze())
@@ -44,7 +75,6 @@ class ViralKineticsDNN(L.LightningModule):
         self.log("validation_loss", loss)
         self.log("validation_accuracy", accuracy)
 
-
     def test_step(self, batch, batch_idx):
         x, y = batch
         result = self.stack(x)
@@ -55,42 +85,72 @@ class ViralKineticsDNN(L.LightningModule):
         self.log("testing_accuracy", accuracy)
 
     def configure_optimizers(self):
-        optimizer = optim.Adam(self.parameters(), lr=0.001)
+        optimizer = OPTIMIZER(params=self.parameters(), lr=LEARNING_RATE)
         return optimizer
 
-class DDEDataset(utils.data.Dataset):
-    def __init__(self, path, atr, has_noise, input_features, num_buckets):
+class _DDEDataset(utils.data.Dataset):
+    """
+    Uses the dataset files generated by DatasetGenerator.py to create a pytorch Dataset usable by ViralKineticsDNN
+    DO NOT USE THIS EXPLICITLY UNLESS YOU HAVE A GOOD REASON. Rather, use any of the below methods for most use cases.
+
+    Notably, we mask values less than or equal to 1 to 1, and perform log normalization. The reason being all variables in the DDE system have large spans of similar values and a short span of interesting action.
+    Additionally, negative values are not applicable to the real world (cannot have negative cells, though that would be cool), so we mask them to 0 (after normalization).
+    We are not trying to mimic the DDE system, rather, use it to demonstrate whether or not there is practical value to getting real biological data and using it to train neural networks. 
+
+    :param path: A string to the relative location of the dataset file
+    :param atr: A integer representing the desired output prediction. Follows the same convention of 0,1,2,3,4,5 as defined in ViralKineticsDNN's parameters
+    :param has_noise: A boolean allowing for gaussian noise, representing tool error, to be added to the dataset. As it stands, the noise has mean 0, SD 10000. I.e, we assume tools may be up to 10000 cells off.
+    :param input_features: the set of input features, as a list. More rigorously defined in ViralKineticsDNN's parameters.
+    :param num_nn_outputs: the number of output features of the neural network. Again, more rigorously defined in ViralKineticsDNN's parameters
+    """
+    def __init__(self, path: str, atr: int, has_noise: bool, input_features: list, num_nn_outputs: int):
         data = pd.read_csv(path)
         
+        # Adds the tool error
         if has_noise:
             noise = np.random.normal(0, 10000, [len(data), 12])
             data = data + noise
 
+        # Masking and normalization
         data = data.mask(data < 1, 1)
         data[['xTarget', 'xPre-Infected', 'xInfected', 'xVirus', 'xCDE8e', 'xCD8m']] = np.log(data[['xTarget', 'xPre-Infected', 'xInfected', 'xVirus', 'xCDE8e', 'xCD8m']])
+        
+        # Getting rid of all input features which are not being used. Also gets rid of all output features which are not atr
         x_cols = ['xTarget', 'xPre-Infected', 'xInfected', 'xVirus', 'xCDE8e', 'xCD8m']
         y_cols = ['yTarget', 'yPre-Infected', 'yInfected', 'yVirus', 'yCDE8e', 'yCD8m']
-
         removed_x_cols = []
         removed_features = list(set([0,1,2,3,4,5]) - set(input_features))
         for feature in removed_features:
             removed_x_cols.append(x_cols[feature])
         data = data.drop(columns=removed_x_cols)
-
         y_cols.pop(atr)
         data = data.drop(columns=y_cols)
 
         self.atr = atr
-        self.num_buckets = num_buckets
+        self.num_nn_outputs = num_nn_outputs
+        
+        # max and min for determining class values
         self.y_max = data.max(axis=0).iloc[-1]
         self.y_min = data.min(axis=0).iloc[-1]
+
         self.data = data
 
-    def __len__(self):
-        return len(self.data)
-
     def bracket(self, y):
-        bucket_size = (self.y_min + self.y_max) / self.num_buckets
+        """
+        Determines and returns which class the value y should be a part of, using the discretization of a continous output approach discussed in ViralKineticsDNN
+        These discrete ranges are determined by the maximum and minimum values of the atr variable
+
+        :param y: any floating point value in the domain [y_min, y_max]. Undefined behavior outside of this domain, so an error will be thrown.
+        
+        :returns: the class value for y. I.e, which subset of the range y falls into. See ViralKineticsDNN for a better description
+        """
+
+        assert y >= self.y_min, "y must be greater than or equal to y_min"
+        assert y <= self.y_max, "y must be less than or equal to y_max"
+
+        # We assume each bracket is the same size.
+        bucket_size = (self.y_min + self.y_max) / self.num_nn_outputs
+
         current_location = self.y_min + bucket_size
         bucket = 0
         while current_location < y:
@@ -99,22 +159,50 @@ class DDEDataset(utils.data.Dataset):
         return bucket
 
     def drop_rows(self, rows):
+        # Useful for getting rid of equi_spaced rows
         self.data = self.data.drop(rows).reset_index(drop=True)
         self.y_max = self.data.max(axis=0).iloc[-1]
         self.y_min = self.data.min(axis=0).iloc[-1]
+
+    def __len__(self):
+        return len(self.data)
 
     def __getitem__(self, idx):
         row = self.data.iloc[idx]
         x = from_numpy(row[0:len(row) - 1].to_numpy()).double()
         y = row.iloc[-1]
-        y_tensor = zeros(self.num_buckets).double()
+        y_tensor = zeros(self.num_nn_outputs).double()
         y_tensor[self.bracket(y)] = 1
         return x, y_tensor
 
-def make_dataset(training_dataset_path, testing_dataset_path, input_features, output_feature, has_noise=False, num_buckets=4, dataset_usage_steps=0):
-    dataset = DDEDataset(training_dataset_path, output_feature, has_noise, input_features, num_buckets)
+def make_dataset(training_dataset_path: str, testing_dataset_path: str, input_features: list, output_feature: int, has_noise: bool, num_outputs: int, dataset_usage_removal_steps: int):
+    """
+    Uses dataset files created by DatasetGenerator.py to create training, validation, and testing sets.
+    Training set is 80% of the data after removing usage with dataset_usage_removal_steps, validation is 20%
+    Testing set will have no removal.
+
+    :param training_dataset_path: a str representing the relative path to the training/validation set file
+    :param testing_dataset_path: a str representing the relative path to the testing set file
+    :param input_features: the set of input features, as a list. Must be a subset (or the whole set) of [0, 1, 2, 3, 4, 5]. Details in ViralKineticsDNN's description
+    :param output_feature: the desired output feature, as an integer. Takes any value 0,1,2,3,4,5, with representations having the same meaning as input_features. Values outside of this range throws an error.
+    :param has_noise: a bool representing whether or not the TRAINING/VALIDATION sets will have gaussian noise. The testing set should never have noise, as it would give different models a different testing set.
+    :param num_outputs: an int representing the number of outputs of the nn. A more detailed explanation is available in ViralKineticsDNN's description
+    :param dataset_usage_removal_steps: an integer representing the number of times to divide the training/validation dataset (pre-split) in half. 
+                                        If we use the entire training set (dataset_usage_removal_steps = 0), we would need to take a datapoint from a real person every solving_timestep (defined in DatasetGenerator.py) days.
+                                        We divide this in half, evenly, dataset_usage_removal_steps times. In the end, we would need to take one datapoint every solving_timestep/(2^dataset_usage_removal_steps) days.
+
+    :returns: The training_set, validation_set, and testing_set as a tuple in that order.
+    """
+
+    assert set(input_features).issubset(set([0, 1, 2, 3, 4, 5])), "input_features are not a subset of [0, 1, 2, 3, 4, 5]"
+    assert output_feature in [0, 1, 2, 3, 4, 5], "output_feature outside of domain"
+    assert num_outputs > 0, "there must be at least one output bracket"
+    assert dataset_usage_removal_steps >= 0, "dataset_usage_removal_steps must be non-negative valued"
+
+    dataset = _DDEDataset(training_dataset_path, output_feature, has_noise, input_features, num_outputs)
     
-    for i in range(dataset_usage_steps):
+    # Evenly removing half the dataset dataset_usage_removal times
+    for _ in range(dataset_usage_removal_steps):
         rows_to_drop = []
         for j in range(len(dataset)):
             if j % 2 != 0:
@@ -122,44 +210,151 @@ def make_dataset(training_dataset_path, testing_dataset_path, input_features, ou
         dataset.drop_rows(rows_to_drop)
 
     training_set, validation_set = utils.data.random_split(dataset, [.8, .2])
-    testing_set = DDEDataset(testing_dataset_path, output_feature, False, input_features, num_buckets)
+    testing_set = _DDEDataset(testing_dataset_path, output_feature, False, input_features, num_outputs)
     return (training_set, validation_set, testing_set)
 
-def run_training(model, training_set, validation_set, testing_set, version=0, epochs=100, model_name=None):
-    training_loader = utils.data.DataLoader(training_set, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, persistent_workers=True, pin_memory=True)
-    validation_loader = utils.data.DataLoader(validation_set, batch_size=BATCH_SIZE, num_workers=2, persistent_workers=True, pin_memory=True)
-    testing_loader = utils.data.DataLoader(testing_set, batch_size=BATCH_SIZE, num_workers=2, persistent_workers=True, pin_memory=True)
-    trainer = L.Trainer(max_epochs=epochs, check_val_every_n_epoch=10, accelerator='auto', log_every_n_steps=2, logger=TensorBoardLogger("lightning_logs", name=model_name, version=version), callbacks=[EarlyStopping("validation_loss", min_delta=0.001), RichProgressBar()])
+def run_training(model: ViralKineticsDNN, training_set: utils.data.Dataset, validation_set: utils.data.Dataset, testing_set: utils.data.Dataset, 
+                 early_stoppage_min_delta = 0.001, max_epochs=100, model_name=None, version=0):
+    """
+    Trains, validates, and tests the given ViralKineticsDNN model. 
+    Batch Size and Num Workers are NOT parameters, as they are system dependent
+    Training ends with early stoppage determined by early_stoppage_min_delta. We also use a funky, rich text progress bar :)
+
+    :param model: the instance of the ViralKineticsDNN model to be trained/tested
+
+    The following parameters ought to be created with make_dataset (in the same order)
+    :param training_set: the pytorch Dataset for training
+    :param validation_set: the pytorch Dataset for validation
+    :param testing_set: the pytorch Dataset for testing
+
+    The following parameters are OPTIONAL, but more than likely you will want to tweak.
+    :param early_stoppage_min_delta: The minimum value the model expects to improve each runthrough the validation set. After 3 of failing, the model stops training.
+                                     Larger values mean quicker, but less ideal training. Defaults to 0.001, which maybe underfits.
+    :param max_epochs: the number of epochs at which point the model will stop training, even if its not done fitting. Acts as a time ceiling for training models. May become an issue with smaller early_stoppage_min_delta values.
+
+    The following parameters are OPTIONAL, but you probably want to let the other methods handle.
+    :param version: the version of the model for logging purposes. Typically, if you are training the same model multiple times for averaged accuracies, we should distinguish the models with just model version.
+    :param model_name: the name of the model in the logs. Typically generated by the models experimental hyperparameters.
+
+    :returns: a tuple, containing the final validation set results (cross entropy loss) and the final testing set results, in that order.
+    """
+    training_loader = utils.data.DataLoader(training_set, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS, persistent_workers=PERSISTENT_WORKERS, pin_memory=PIN_MEMORY)
+    validation_loader = utils.data.DataLoader(validation_set, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS, persistent_workers=PERSISTENT_WORKERS, pin_memory=PIN_MEMORY)
+    testing_loader = utils.data.DataLoader(testing_set, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS, persistent_workers=PERSISTENT_WORKERS, pin_memory=PIN_MEMORY)
+
+    trainer = L.Trainer(max_epochs=max_epochs, check_val_every_n_epoch=10, accelerator='auto', log_every_n_steps=2, logger=TensorBoardLogger("lightning_logs", name=model_name, version=version), callbacks=[EarlyStopping("validation_loss", min_delta=early_stoppage_min_delta), RichProgressBar()])
     trainer.fit(model=model, train_dataloaders=training_loader, val_dataloaders=validation_loader)
+
     return trainer.validate(model, dataloaders=validation_loader), trainer.test(model, dataloaders=testing_loader)
 
-def testing_average(num_tests, input_features, num_buckets, training_dataset_path, testing_dataset_path, output_feature, has_noise=False, dataset_usage_steps=0):
+def testing_average(num_tests: int, input_features: list, num_outputs: int, training_dataset_path: str, testing_dataset_path: str, output_feature: int, dataset_usage_removal_steps: int, has_noise: bool):
+    """
+    Creates, trains, and tests a model with input_features/num_outputs parameters num_tests times, and calculates the average validation loss/accuracy and the average testing loss/accuracy.
+    Different model initializations and dataset splits may result in different model performance, so an average may give a better overall idea of true performance.
+
+    :param num_tests: an int representing the number of ititialization/train/test iterations to perform. i.e, the number of run_training calls
+    :param input_features: the set of input features, as a list. See ViralKineticsDNN's parameters for more info.
+    :param num_outputs: an int representing the number of outputs of the nn. A more detailed explanation is available in ViralKineticsDNN's description
+    :param training_dataset_path: a str of the relative path to the training dataset file, generated by DatasetGenerator.py
+    :param testing_dataset_path: a str of the relative path to the testing dataset file, generated by DatasetGenerator.py
+    :param output_feature: the desired output feature, as an integer. Takes any value 0,1,2,3,4,5, with representations having the same meaning as input_features. Values outside of this range throws an error.
+    :param dataset_usage_removal_steps: an int, representing the number of times to divide the training dataset in half. More details in make_dataset's parameters.
+    :param has_noise: a bool representing whether or not the TRAINING/VALIDATION sets will have gaussian noise.
+
+    :returns: a tuple, containing the average validation loss, the average validation accuracy, the average testing loss, and the average testing accuracy, in that order.
+    """
     total_val_loss = 0
     total_val_accuracy = 0
     total_loss = 0
     total_accuracy = 0
+
     for i in range(num_tests):
-        model = ViralKineticsDNN(input_features, num_buckets)
-        training_set, validation_set, testing_set = make_dataset(training_dataset_path, testing_dataset_path, input_features, output_feature, has_noise=has_noise, num_buckets=num_buckets, dataset_usage_steps=dataset_usage_steps)
-        validation_results, testing_results = run_training(model, training_set, validation_set, testing_set, version=i, epochs=10000, model_name="ViralKineticsDDE_" + str(input_features) + "_" + str(output_feature) + "_" + str(dataset_usage_steps) + "_" + str(num_buckets))
+        model = ViralKineticsDNN(input_features, num_outputs)
+        training_set, validation_set, testing_set = make_dataset(training_dataset_path, testing_dataset_path, input_features, output_feature, has_noise=has_noise, num_outputs=num_outputs, dataset_usage_removal_steps=dataset_usage_removal_steps)
+        validation_results, testing_results = run_training(model, training_set, validation_set, testing_set, version=i, max_epochs=10000, model_name="ViralKineticsDDE_" + str(input_features) + "_" + str(output_feature) + "_" + str(dataset_usage_removal_steps) + "_" + str(num_outputs))
+
+        # If multiple loaders are used, the first index specifies which loader. Since we only have 1 loader, first index is always 0.
         total_val_loss += validation_results[0]['validation_loss']
         total_val_accuracy += validation_results[0]['validation_accuracy']
         total_loss += testing_results[0]["testing_loss"]
         total_accuracy += testing_results[0]["testing_accuracy"]
+        
     return (total_val_loss/num_tests, total_val_accuracy/num_tests, total_loss/num_tests, total_accuracy/num_tests)
 
-def perform_experiment(output_path, training_path, testing_path, data_usage_steps, initial_num_buckets, final_num_buckets, buckets_multiplier, input_combinations, output_features, num_tests_per_model=3, has_noise=False):
+def perform_experiment(training_dataset_path: str, testing_dataset_path: str, dataset_usage_removal_steps: int, num_outputs_set: list[int], input_combinations_set: list[list[int]], output_features: list[int], output_file_name, overwrite_experiment = False, num_tests_per_model=3, has_noise=True):
+    """
+    Performs a testing_average upon a set of models. Afterwards, it generates and saves a CSV with the results in a /results directory.
+    The models it will call testing_average on are all combinations of range(0, dataset_usage_removal_steps), num_outputs_sets, input_combinations_set, output_features.
+
+    If the experiment had already begun (the file is in results directory), it will skip all models already created, and resume where it left off. Don't use this to try and append more experiments to the same file, the saving mechanism will skip most of the new experiments.
+
+    :param training_dataset_path: a str of the relative path to the training dataset file, generated by DatasetGenerator.py
+    :param testing_dataset_path: a str of the relative path to the testing dataset file, generated by DatasetGenerator.py
+    :param dataset_usage_removal_steps: an int, representing the number of times to divide the training dataset in half. Each number between 0 and dataset_usage_steps (inclusive) has its own model. More details in make_dataset's parameters.
+    :param num_outputs_set: a list of any non-negative integers. For each of these values, a model will be created with num_outputs as that integer. More details on num_outputs in ViralKineticsDNN's parameters.
+    :param input_combinations_set: a list of lists, each list should be a subset of [0, 1, 2, 3, 4, 5]. Each of these lists will be used as input_features for a DNN model. More details on the meanings of 0,...,5 in ViralKineticsDNN's parameters.
+    :param output_features: a list, specifically a subset of [0, 1, 2, 3, 4, 5]. Each output feature will get its own model. More details on the meanings of 0,...,5 in ViralKineticsDNN's parameters.
+    :param output_file_name: The name of the csv to be written to /results. MUST end in ".csv". If you want to continue the experiment later, the name must be consistent. Do NOT forget to change the name if you perform a seperate experiment.
+
+    The following parameters are OPTIONAL:
+
+    :param num_tests_per_model: the number of run_training calls for each model before an averaged loss/accuracy is returned. Defaults to 3.
+    :param has_noise: whether or not to add gaussian noise to the training/validation sets. Defaults to True.
+    """
+
+    results_path = Path("./results")
+    results_path.mkdir(exist_ok=True)
+    results_file = results_path / output_file_name
+
+    # Attempts to load the in-progress experiment. 
     final_results = []
-    for steps in range(data_usage_steps):
-        num_buckets = initial_num_buckets
-        while (num_buckets <= final_num_buckets):
-            for combination in input_combinations:
+    if results_file.is_file() and not overwrite_experiment:
+        temp = pd.read_csv(results_file)
+        # If you know a better way of doing this, go ahead and do it
+        for _, row in temp.iterrows():
+            final_results.append((row.input_features, row.output_feature, row.data_usage, row.num_outputs, row.average_final_validation_loss, row.average_final_validation_accuracy, row.average_testing_loss, row.average_testing_accuracy))
+            
+    counter = 0
+    # 4 nested loops lol have fun
+    for steps in range(dataset_usage_removal_steps):
+        for num_outputs in num_outputs_set:
+            for combination in input_combinations_set:
                 for output_feature in output_features:
-                    results = testing_average(num_tests_per_model, combination, num_buckets, training_path, testing_path, output_feature, dataset_usage_steps=steps, has_noise=has_noise)
-                    final_results.append((combination, output_feature, 100/np.power(2, steps), num_buckets, results[0], results[1], results[2], results[3]))
-            num_buckets *= buckets_multiplier
-    final_results = pd.DataFrame(final_results, columns=["input_features", "output_feature", "data_usage", "num_buckets", "average_final_validation_loss", "average_final_validation_accuracy", "average_testing_loss", "average_testing_accuracy"])
-    final_results.to_csv(output_path)
+                    # We assume here that the exact same experiment is being performed. Do NOT try to append new experiments to an old experiment's file
+                    if counter >= len(final_results):
+                        # Due to the way the saving works, we get odd behavior on half complete testing_average runs (or follow up experiments that hit the same models). Here, we simply delete those experiments, rerunning them and losing a little time.
+                        log_path = Path("./lightning_logs")
+                        experiment_path = (log_path / str("ViralKineticsDDE_" + str(combination) + "_" + str(output_feature) + "_" + str(steps) + "_" + str(num_outputs)))
+                        if experiment_path.exists():
+                            shutil.rmtree(experiment_path)
+
+                        # Running the experiment and saving the results.
+                        results = testing_average(num_tests_per_model, combination, num_outputs, training_dataset_path, testing_dataset_path, output_feature, steps, has_noise)
+                        final_results.append((combination, output_feature, 100/np.power(2, steps), num_outputs, results[0], results[1], results[2], results[3]))
+                        pd.DataFrame(final_results, columns=["input_features", "output_feature", "data_usage", "num_outputs", "average_final_validation_loss", "average_final_validation_accuracy", "average_testing_loss", "average_testing_accuracy"]).to_csv(results_file)
+                    counter += 1
+
+    print("Experimentation complete, saving final csv.")
+    pd.DataFrame(final_results, columns=["input_features", "output_feature", "data_usage", "num_outputs", "average_final_validation_loss", "average_final_validation_accuracy", "average_testing_loss", "average_testing_accuracy"]).to_csv(results_file)
 
 if __name__ == '__main__':
-   perform_experiment("results/immune_memory_results.csv", "data/viral_kinetics_none_0.001_1_0_12.csv", "data/viral_kinetics_beta_delta_e_1_0.001_1_0_12.csv", 8, 4, 16, 2, list(combinations((0,1,2,3,4,5), 5)) + [(0,1,2,3,4,5)], [2,3,4,5], has_noise=True)
+    """
+    This is an example experiment. You may wish to run your own experiments from a seperate file.
+    You MUST define BATCH_SIZE, NUM_WORKERS, PERSISTENT_WORKERS, PIN_MEMORY, LOSS_FUNCTION, OPTIMIZER, and LEARNING_RATE in any script. If you don't, the behavior is not defined.
+    """
+
+    # If you are running on GPU, you want these, I promise
+    set_float32_matmul_precision("medium")
+    PIN_MEMORY = True
+
+    # These are system specific, figure out what works best for you!
+    BATCH_SIZE = 64 # There is a lot of debate about batch size, in my experience, you want as large as possible (system dependent) as it will speed up convergence and I have never seen large values impact accuracy negatively.
+    NUM_WORKERS = 4
+    PERSISTENT_WORKERS = True
+
+    # These are nn hyperparameters you may want to change. These are what I did my experimentation with.
+    LOSS_FUNCTION = nn.CrossEntropyLoss()
+    OPTIMIZER = optim.Adam
+    LEARNING_RATE = 0.001
+
+    perform_experiment("data/viral_kinetics_none_0.001_1_0_12_[10000000.0, 75, 0, 0, 0, 0].csv", "data/viral_kinetics_beta_delta_e_1_0.001_1_0_12_[10000000.0, 75, 0, 0, 0, 0].csv", 8, [4, 8, 16], list(combinations([0,1,2,3,4,5], 5)) + [[0,1,2,3,4,5]], [2, 3, 4, 5], "results.csv")

@@ -155,7 +155,7 @@ class DDEViralKineticsModel:
         graphs_dir = Path("./graphs")
         graphs_dir.mkdir(exist_ok=True)
 
-        save_directory = graphs_dir / "Solution_Curves"
+        save_directory = graphs_dir / "solution_curves"
         save_directory.mkdir(exist_ok=True)
 
         figure.savefig(save_directory / file_name)
@@ -182,7 +182,7 @@ if __name__ == '__main__':
         ['E_M', "CDE8m_log10.png", solution, t, safe_log10, "(log10)"]
     ]
 
-    for parameter_set in tqdm(parameter_sets, desc="Generating Solution Curve Graphs"):
+    for parameter_set in tqdm(parameter_sets, desc="Generating Solution Curve Graphs", leave=False):
         model.create_graph(*parameter_set)
 
     "Generation Complete!"

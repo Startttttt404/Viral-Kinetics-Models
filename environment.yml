@@ -1,0 +1,20 @@
+name: viral_kinetics_models
+channels:
+  - pytorch
+  - nvidia
+  - defaults
+dependencies:
+- numpy
+- pandas
+- tqdm
+- matplotlib
+- pytorch
+- torchvision 
+- torchaudio 
+- pytorch-cuda=12.1 
+- lightning
+- tensorboard
+- pip
+- pip:
+  - seaborn==0.13.*
+  - ddeint

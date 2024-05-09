@@ -24,6 +24,7 @@ def _generate_within_confidence(confidence_interval: list, num_choices):
 
     :param confidence_interval: A range of values as a list, particularly the confidence intervals defined above. 
     :param num_choices: the number of values to generate
+
     :return: A list of the generated values in random order.
     """
 
@@ -103,12 +104,12 @@ def generate_viral_kinetics_dataset(variable_elements: list, num_choices: int, s
     systems = []
     for system_combination in tqdm(product(element_value_lists['beta'], element_value_lists['k'], element_value_lists['p'], element_value_lists['c'], element_value_lists['delta'], element_value_lists['delta_e'],
                                            element_value_lists['k_delta_e'], element_value_lists['xi'], element_value_lists['k_e'], element_value_lists['eta'], element_value_lists['tau_e'], element_value_lists['d_e'],
-                                           element_value_lists['zeta'], element_value_lists['tau_m']), desc="Generating Combinations"):
+                                           element_value_lists['zeta'], element_value_lists['tau_m']), desc="Generating Combinations", leave=False):
         systems.append(system_combination)
 
     # Computes the solution for each system in 'systems'. Iterates through the solution and generates datapoints in the form defined above.
     datapoints = []
-    for system in tqdm(systems, desc="Computing Solutions"):
+    for system in tqdm(systems, desc="Computing Solutions", leave=False):
         model = DDEViralKineticsModel(*system)
         solution = model.solve(solving_timestep, t_0, t_n, y_0)
 
